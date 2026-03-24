@@ -214,6 +214,21 @@
   .zones{display:grid;grid-template-columns:1fr;gap:calc(6px * var(--ui))}
   .zone-btn{height:calc(34px * var(--ui));font-size:calc(13px * var(--ui))}
   .zone-btn.active{background:#151e2c;border-color:#2a3550}
+  .obj-hdr{display:flex;align-items:center;justify-content:space-between;}
+  .obj-mode-btn{height:calc(26px * var(--ui));font-size:calc(11px * var(--ui));padding:0 calc(8px * var(--ui));border-radius:calc(7px * var(--ui));}
+  .obj-mode-btn.active{background:#151e2c;border-color:#2a3550;color:#7ab8f5;}
+  .objects-list{display:flex;flex-direction:column;gap:calc(5px * var(--ui));}
+  .obj-item{display:flex;align-items:center;gap:calc(6px * var(--ui));background:#0e1118;border:1px solid #1a1f2a;border-radius:calc(8px * var(--ui));padding:calc(4px * var(--ui)) calc(8px * var(--ui));cursor:pointer;min-width:0;}
+  .obj-item.selected{border-color:#2a3550;background:#151e2c;}
+  .obj-item-dot{width:calc(8px * var(--ui));height:calc(8px * var(--ui));border-radius:2px;background:#7ab8f5;flex:0 0 auto;}
+  .obj-item-body{flex:1;min-width:0;}
+  .obj-item-label{font-size:calc(13px * var(--ui));overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg);}
+  .obj-item-coords{font-size:calc(11px * var(--ui));color:var(--muted);}
+  .obj-item-del{color:var(--err);background:transparent;border:none;cursor:pointer;padding:0 calc(4px * var(--ui));height:auto;min-width:0;font-size:calc(14px * var(--ui));line-height:1;flex:0 0 auto;}
+  .obj-editor{display:flex;flex-direction:column;gap:calc(4px * var(--ui));padding:calc(4px * var(--ui)) 0 0;}
+  .obj-editor-fields{display:grid;grid-template-columns:1fr 1fr;gap:calc(4px * var(--ui));}
+  .obj-editor input{height:calc(30px * var(--ui));font-size:calc(12px * var(--ui));}
+  .obj-field-lbl{font-size:calc(11px * var(--ui));color:var(--muted);margin-bottom:1px;}
   .row.equal .btn-primary,.row.equal .btn-plain{min-width:calc(96px * var(--ui))}
   @media (max-width:1150px){
     :root{--btnh0:34px}
@@ -341,6 +356,14 @@
           <button class="zone-btn btn-plain" data-zone="excl">Exclusion Zone</button>
         </div>
       </div>
+      <div class="section" id="objectsSection">
+        <div class="title obj-hdr">
+          Objects
+          <button id="objectsModeBtn" class="btn-plain obj-mode-btn">Edit</button>
+        </div>
+        <div id="objectsList" class="objects-list"></div>
+        <button id="addObjectBtn" class="btn-plain" style="width:100%;margin-top:calc(2px * var(--ui))">+ Add Object</button>
+      </div>
       <div class="section">
         <div class="title">Actions</div>
         <div class="row equal">
@@ -375,6 +398,9 @@
   const modeTitle=$('modeTitle');
   const sDot=$('sDot'), sText=$('sText');
   const zoneBtns=[...document.querySelectorAll('.zone-btn')];
+  const objectsModeBtn=$('objectsModeBtn');
+  const addObjectBtn=$('addObjectBtn');
+  const objectsListEl=$('objectsList');
   const legend=$('legend');
   const viewToggle=$('viewToggle');
   const floorplanBtn=$('floorplanBtn');
@@ -464,6 +490,12 @@
   let cssW=0, cssH=0, dpr=1, PAD=12;
   let currentZone=null;
   let zones={'1':[],'2':[],'3':[],'excl':[]};
+  let objects=[];
+  let objectsMode=false;
+  let selectedObjectIdx=null;
+  let objectDragIdx=null;
+  let objectDragOffX=0, objectDragOffY=0;
+  const OBJECTS_KEY='zone-editor-objects';
   const makeLivePos=()=>({
     1: { x: NaN, y: NaN, px: NaN, py: NaN, heading: 0 },
     2: { x: NaN, y: NaN, px: NaN, py: NaN, heading: 0 },
@@ -1061,12 +1093,9 @@
     return Math.max(0, Math.min(maxR, range|0));
   }
   const sensorFovRange=(sensor, mode)=> clampFovRange(sensorDetRange(sensor), mode);
-  const cloneZones=(src)=>({
-    '1':[...(src?.['1']||[])].map(p=>({x:p.x,y:p.y})),
-    '2':[...(src?.['2']||[])].map(p=>({x:p.x,y:p.y})),
-    '3':[...(src?.['3']||[])].map(p=>({x:p.x,y:p.y})),
-    'excl':[...(src?.['excl']||[])].map(p=>({x:p.x,y:p.y}))
-  });
+  const cloneZones=(src)=>Object.fromEntries(
+    zoneBtns.map(b=>b.dataset.zone).map(z=>[z,[...(src?.[z]||[])].map(p=>({x:p.x,y:p.y}))])
+  );
   const makeSensor=(x,y,dev)=>{
     const mode = dev?.device_id===selectedDevice?.device_id ? normalizeInstallModeValue(installMode) : null;
     const sensor={
@@ -1085,8 +1114,180 @@
     const raw=Number(s?.detRange ?? s?.det_range ?? s?.detection_range ?? s?.detection_range_cm);
     return Number.isFinite(raw) ? raw : 0;
   };
-  const emptyZones=()=>({'1':[],'2':[],'3':[],'excl':[]});
+  const emptyZones=()=>Object.fromEntries(zoneBtns.map(b=>[b.dataset.zone,[]]));
   const sensorZones=(s)=> (s?.zones || emptyZones());
+
+  // ── Objects ──────────────────────────────────────────────────────────────
+  function objectsStorageKey(){
+    return OBJECTS_KEY+(selectedDevice?.device_id?'_'+selectedDevice.device_id:'');
+  }
+  function loadObjectsForDevice(){
+    try{
+      const raw=localStorage.getItem(objectsStorageKey());
+      if(!raw) return [];
+      const arr=JSON.parse(raw);
+      return Array.isArray(arr)?arr:[];
+    }catch(_){return [];}
+  }
+  function saveObjects(){
+    try{ localStorage.setItem(objectsStorageKey(),JSON.stringify(objects)); }catch(_){}
+  }
+  function genObjectId(){
+    return 'obj_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
+  }
+  function currentBounds(){
+    return (installMode==='top')?TOP_BOUNDS:BASE_BOUNDS;
+  }
+  function renderObjectsList(){
+    if(!objectsListEl) return;
+    objectsListEl.innerHTML='';
+    objects.forEach((obj,i)=>{
+      const item=document.createElement('div');
+      item.className='obj-item'+(selectedObjectIdx===i?' selected':'');
+
+      const dot=document.createElement('div');
+      dot.className='obj-item-dot';
+
+      const body=document.createElement('div');
+      body.className='obj-item-body';
+
+      const lblEl=document.createElement('div');
+      lblEl.className='obj-item-label';
+      lblEl.textContent=obj.label||('Object '+(i+1));
+
+      const coordsEl=document.createElement('div');
+      coordsEl.className='obj-item-coords';
+      coordsEl.textContent=`(${obj.x}, ${obj.y}) \u2022 ${obj.w}\u00d7${obj.h} cm`;
+
+      body.appendChild(lblEl);
+      body.appendChild(coordsEl);
+
+      const del=document.createElement('button');
+      del.className='obj-item-del';
+      del.textContent='\u2715';
+      del.title='Delete object';
+      del.addEventListener('click',e=>{
+        e.stopPropagation();
+        objects.splice(i,1);
+        if(selectedObjectIdx===i) selectedObjectIdx=null;
+        else if(selectedObjectIdx!==null && selectedObjectIdx>i) selectedObjectIdx--;
+        saveObjects();
+        renderObjectsList();
+        enqueueDraw();
+      });
+
+      item.appendChild(dot);
+      item.appendChild(body);
+      item.appendChild(del);
+      item.addEventListener('click',()=>{
+        selectedObjectIdx=(selectedObjectIdx===i)?null:i;
+        renderObjectsList();
+        enqueueDraw();
+      });
+      objectsListEl.appendChild(item);
+
+      if(selectedObjectIdx===i){
+        const editor=document.createElement('div');
+        editor.className='obj-editor';
+
+        // Label field
+        const lblRow=document.createElement('div');
+        const lblHdr=document.createElement('div');
+        lblHdr.className='obj-field-lbl';
+        lblHdr.textContent='Label';
+        const lblInput=document.createElement('input');
+        lblInput.type='text';
+        lblInput.value=obj.label||'';
+        lblInput.placeholder='Object name';
+        lblInput.addEventListener('input',()=>{
+          obj.label=lblInput.value;
+          lblEl.textContent=obj.label||('Object '+(i+1));
+          saveObjects();
+          enqueueDraw();
+        });
+        lblRow.appendChild(lblHdr);
+        lblRow.appendChild(lblInput);
+        editor.appendChild(lblRow);
+
+        // Numeric fields grid
+        const fields=document.createElement('div');
+        fields.className='obj-editor-fields';
+        const b=currentBounds();
+        function numField(label,val,min,max,onChange){
+          const wrap=document.createElement('div');
+          const h=document.createElement('div');
+          h.className='obj-field-lbl';
+          h.textContent=label;
+          const inp=document.createElement('input');
+          inp.type='number';
+          inp.value=val;
+          inp.min=min;
+          inp.max=max;
+          inp.step=1;
+          inp.addEventListener('change',()=>{
+            const v=Math.round(Number(inp.value));
+            if(Number.isFinite(v)){ onChange(v); saveObjects(); renderObjectsList(); enqueueDraw(); }
+          });
+          wrap.appendChild(h);
+          wrap.appendChild(inp);
+          return wrap;
+        }
+        fields.appendChild(numField('X (cm)',obj.x,b.xMin,b.xMax,v=>{obj.x=v;}));
+        fields.appendChild(numField('Y (cm)',obj.y,b.yMin,b.yMax,v=>{obj.y=v;}));
+        fields.appendChild(numField('Width (cm)',obj.w,1,2000,v=>{obj.w=v;}));
+        fields.appendChild(numField('Depth (cm)',obj.h,1,2000,v=>{obj.h=v;}));
+        editor.appendChild(fields);
+        objectsListEl.appendChild(editor);
+      }
+    });
+  }
+  function drawObjects(){
+    if(!objects.length) return;
+    ctx.save();
+    objects.forEach((obj,i)=>{
+      const sel=selectedObjectIdx===i;
+      const px1=toPxX(obj.x-obj.w/2), py1=toPxY(obj.y-obj.h/2);
+      const pw=toPxX(obj.x+obj.w/2)-px1;
+      const ph=toPxY(obj.y+obj.h/2)-py1;
+      ctx.globalAlpha=sel?0.32:0.18;
+      ctx.fillStyle=sel?'#7ab8f5':'#8fbbd8';
+      ctx.beginPath();
+      ctx.rect(px1,py1,pw,ph);
+      ctx.fill();
+      ctx.globalAlpha=sel?1:0.55;
+      ctx.strokeStyle=sel?'#7ab8f5':'#4a7a9b';
+      ctx.lineWidth=sel?1.5:1;
+      ctx.stroke();
+      const cx=px1+pw/2, cy=py1+ph/2;
+      ctx.globalAlpha=sel?0.95:0.65;
+      const fs=Math.max(9,Math.min(14,Math.round(11*(cam2D?.zoom||1))));
+      ctx.font=`${fs}px system-ui,sans-serif`;
+      ctx.textAlign='center';
+      ctx.textBaseline='middle';
+      ctx.fillStyle=sel?'#c8dff5':'#7aaac8';
+      ctx.fillText(obj.label||('Obj '+(i+1)),cx,cy);
+      if(objectsMode){
+        ctx.beginPath();
+        ctx.arc(cx,cy,5,0,Math.PI*2);
+        ctx.fillStyle=sel?'#7ab8f5':'#4a7a9b';
+        ctx.globalAlpha=0.85;
+        ctx.fill();
+      }
+    });
+    ctx.globalAlpha=1;
+    ctx.restore();
+  }
+  function hitObject(px,py){
+    for(let i=objects.length-1;i>=0;i--){
+      const obj=objects[i];
+      const ox=toPxX(obj.x), oy=toPxY(obj.y);
+      const hw=Math.abs(toPxX(obj.x+obj.w/2)-ox);
+      const hh=Math.abs(toPxY(obj.y+obj.h/2)-oy);
+      if(px>=ox-hw&&px<=ox+hw&&py>=oy-hh&&py<=oy+hh) return i;
+    }
+    return -1;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
   const clampSensorPos=(s)=>{
     const cloned = {...s};
     cloned.x=clamp(Number(s.x)||0,FLOORPLAN_BOUNDS.xMin,FLOORPLAN_BOUNDS.xMax);
@@ -1261,6 +1462,8 @@
     };
     await loadDeviceEntities(target.device_id);
     await loadAll();
+    objects=loadObjectsForDevice();
+    renderObjectsList();
     const sensorIdx = floorplanSensors.findIndex(s=>s.device_id===selectedDevice.device_id);
     if(sensorIdx>=0){
       floorplanSensors[sensorIdx]=clampSensorPos({
@@ -4008,6 +4211,7 @@ ctx.restore();
         drawHandles(zones[currentZone]);
       }
       drawTargets();
+      drawObjects();
     }
 
     const showLegend = (!floorplanEnabled && viewMode === 'heatmap');
@@ -4940,6 +5144,44 @@ ctx.restore();
     lastPY=py;
     dragWhole=false;
 
+    if(objectsMode){
+      if(button===2){
+        const hit=hitObject(px,py);
+        if(hit>=0){
+          objects.splice(hit,1);
+          if(selectedObjectIdx===hit) selectedObjectIdx=null;
+          else if(selectedObjectIdx!==null&&selectedObjectIdx>hit) selectedObjectIdx--;
+          saveObjects();
+          renderObjectsList();
+          enqueueDraw();
+        }
+        return;
+      }
+      const hit=hitObject(px,py);
+      if(hit>=0){
+        selectedObjectIdx=hit;
+        objectDragIdx=hit;
+        objectDragOffX=toCmX(px)-objects[hit].x;
+        objectDragOffY=toCmY(py)-objects[hit].y;
+        renderObjectsList();
+        enqueueDraw();
+      } else {
+        const b=currentBounds();
+        const x=Math.round(Math.max(b.xMin,Math.min(b.xMax,toCmX(px))));
+        const y=Math.round(Math.max(b.yMin,Math.min(b.yMax,toCmY(py))));
+        const newObj={id:genObjectId(),x,y,w:50,h:50,label:'Object '+(objects.length+1)};
+        objects.push(newObj);
+        selectedObjectIdx=objects.length-1;
+        objectDragIdx=selectedObjectIdx;
+        objectDragOffX=0;
+        objectDragOffY=0;
+        saveObjects();
+        renderObjectsList();
+        enqueueDraw();
+      }
+      return;
+    }
+
     if(!currentZone){
       const hit = hitZoneAt(px,py);
       if(hit){
@@ -5074,6 +5316,18 @@ ctx.restore();
       return;
     }
 
+    if(objectsMode && objectDragIdx!==null){
+      const obj=objects[objectDragIdx];
+      if(obj){
+        const b=currentBounds();
+        obj.x=Math.round(Math.max(b.xMin,Math.min(b.xMax,toCmX(px)-objectDragOffX)));
+        obj.y=Math.round(Math.max(b.yMin,Math.min(b.yMax,toCmY(py)-objectDragOffY)));
+        renderObjectsList();
+        enqueueDraw();
+      }
+      return;
+    }
+
     if(dragIdx==null && !dragWhole) return;
     if(dragWhole){
       const dx=toCmX(px)-toCmX(lastPX);
@@ -5110,6 +5364,10 @@ ctx.restore();
     }
     dragIdx=null;
     dragWhole=false;
+    if(objectDragIdx!==null){
+      saveObjects();
+      objectDragIdx=null;
+    }
   }
 
 
@@ -5335,6 +5593,10 @@ ctx.restore();
       if(!dev){
         reportError('No data available');
         return;
+      }
+      if(objectsMode){
+        objectsMode=false;
+        if(objectsModeBtn){ objectsModeBtn.classList.remove('active'); objectsModeBtn.textContent='Edit'; }
       }
       setCurrentZone(zoneId);
       enqueueDraw();
@@ -5670,6 +5932,32 @@ ctx.restore();
       if(!floorplanEnabled) return;
       redoFloorplan();
       flashButton(floorplanRedoBtn);
+    });
+  }
+
+  if(objectsModeBtn){
+    objectsModeBtn.addEventListener('click',()=>{
+      objectsMode=!objectsMode;
+      if(objectsMode){
+        currentZone=null;
+        zoneBtns.forEach(b=>b.classList.remove('active'));
+      }
+      objectsModeBtn.classList.toggle('active',objectsMode);
+      objectsModeBtn.textContent=objectsMode?'Done':'Edit';
+      enqueueDraw();
+    });
+  }
+  if(addObjectBtn){
+    addObjectBtn.addEventListener('click',()=>{
+      const b=currentBounds();
+      const x=Math.round((b.xMin+b.xMax)/2);
+      const y=Math.round((b.yMin+b.yMax)/2);
+      const newObj={id:genObjectId(),x,y,w:50,h:50,label:'Object '+(objects.length+1)};
+      objects.push(newObj);
+      selectedObjectIdx=objects.length-1;
+      saveObjects();
+      renderObjectsList();
+      enqueueDraw();
     });
   }
 
