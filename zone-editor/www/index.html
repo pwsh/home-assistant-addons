@@ -362,7 +362,6 @@
           <button id="objectsModeBtn" class="btn-plain obj-mode-btn">Edit</button>
         </div>
         <div id="objectsList" class="objects-list"></div>
-        <button id="addObjectBtn" class="btn-plain" style="width:100%;margin-top:calc(2px * var(--ui))">+ Add Object</button>
       </div>
       <div class="section">
         <div class="title">Actions</div>
@@ -399,7 +398,6 @@
   const sDot=$('sDot'), sText=$('sText');
   const zoneBtns=[...document.querySelectorAll('.zone-btn')];
   const objectsModeBtn=$('objectsModeBtn');
-  const addObjectBtn=$('addObjectBtn');
   const objectsListEl=$('objectsList');
   const legend=$('legend');
   const viewToggle=$('viewToggle');
@@ -490,12 +488,15 @@
   let cssW=0, cssH=0, dpr=1, PAD=12;
   let currentZone=null;
   let zones={'1':[],'2':[],'3':[],'excl':[]};
-  let objects=[];
+  let objects=[
+    {n:1, x:0, y:0, r:50, label:'Object 1', enabled:false},
+    {n:2, x:0, y:0, r:50, label:'Object 2', enabled:false},
+    {n:3, x:0, y:0, r:50, label:'Object 3', enabled:false},
+  ];
   let objectsMode=false;
   let selectedObjectIdx=null;
   let objectDragIdx=null;
   let objectDragOffX=0, objectDragOffY=0;
-  const OBJECTS_KEY='zone-editor-objects';
   const makeLivePos=()=>({
     1: { x: NaN, y: NaN, px: NaN, py: NaN, heading: 0 },
     2: { x: NaN, y: NaN, px: NaN, py: NaN, heading: 0 },
@@ -1118,101 +1119,126 @@
   const sensorZones=(s)=> (s?.zones || emptyZones());
 
   // ── Objects ──────────────────────────────────────────────────────────────
-  function objectsStorageKey(){
-    return OBJECTS_KEY+(selectedDevice?.device_id?'_'+selectedDevice.device_id:'');
-  }
-  function loadObjectsForDevice(){
-    try{
-      const raw=localStorage.getItem(objectsStorageKey());
-      if(!raw) return [];
-      const arr=JSON.parse(raw);
-      return Array.isArray(arr)?arr:[];
-    }catch(_){return [];}
-  }
-  function saveObjects(){
-    try{ localStorage.setItem(objectsStorageKey(),JSON.stringify(objects)); }catch(_){}
-  }
-  function genObjectId(){
-    return 'obj_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
-  }
   function currentBounds(){
     return (installMode==='top')?TOP_BOUNDS:BASE_BOUNDS;
+  }
+  function readSwitchBySuffix(suffix){
+    const e=entities.find(x=>x.entity_id.endsWith(suffix));
+    return e?.state==='on';
+  }
+  function readTextBySuffix(suffix){
+    const e=entities.find(x=>x.entity_id.endsWith(suffix));
+    return (e?.state&&e.state!=='unknown'&&e.state!=='unavailable')?e.state:null;
+  }
+  function loadObjectsCore(){
+    for(let n=1;n<=3;n++){
+      const obj=objects[n-1];
+      obj.x=readNumberBySuffix(`obj${n}_x`)??0;
+      obj.y=readNumberBySuffix(`obj${n}_y`)??0;
+      obj.r=readNumberBySuffix(`obj${n}_halo`)??50;
+      obj.enabled=readSwitchBySuffix(`obj${n}_enabled`);
+      obj.label=readTextBySuffix(`obj${n}_name`)||`Object ${n}`;
+    }
+  }
+  async function saveObjectToHA(n){
+    const obj=objects[n-1];
+    if(!obj) return;
+    const b=currentBounds();
+    const x=Math.round(Math.max(b.xMin,Math.min(b.xMax,obj.x)));
+    const y=Math.round(Math.max(b.yMin,Math.min(b.yMax,obj.y)));
+    const r=Math.max(0,Math.round(obj.r));
+    await setNumberBySuffix(`obj${n}_x`,x);
+    await setNumberBySuffix(`obj${n}_y`,y);
+    await setNumberBySuffix(`obj${n}_halo`,r);
+  }
+  async function saveObjectEnabledToHA(n){
+    const obj=objects[n-1];
+    if(!obj) return;
+    const eid=findEntityIdBySuffix(`obj${n}_enabled`);
+    if(!eid) return;
+    await api(`api/services/switch/turn_${obj.enabled?'on':'off'}`,{entity_id:eid});
+    const e=entities.find(x=>x.entity_id===eid);
+    if(e) e.state=obj.enabled?'on':'off';
+  }
+  function updateZoneButtonLabels(){
+    zoneBtns.forEach(btn=>{
+      const z=btn.dataset.zone;
+      if(z==='excl') return;
+      const name=readTextBySuffix(`zone${z}_name`);
+      if(name) btn.textContent=name;
+    });
   }
   function renderObjectsList(){
     if(!objectsListEl) return;
     objectsListEl.innerHTML='';
+    const b=currentBounds();
     objects.forEach((obj,i)=>{
+      const n=obj.n;
+      const sel=selectedObjectIdx===i;
+
       const item=document.createElement('div');
-      item.className='obj-item'+(selectedObjectIdx===i?' selected':'');
+      item.className='obj-item'+(sel?' selected':'');
 
       const dot=document.createElement('div');
       dot.className='obj-item-dot';
+      dot.style.background=obj.enabled?'#7ab8f5':'#3a4a5a';
 
       const body=document.createElement('div');
       body.className='obj-item-body';
 
       const lblEl=document.createElement('div');
       lblEl.className='obj-item-label';
-      lblEl.textContent=obj.label||('Object '+(i+1));
+      lblEl.textContent=obj.label;
 
       const coordsEl=document.createElement('div');
       coordsEl.className='obj-item-coords';
-      coordsEl.textContent=`(${obj.x}, ${obj.y}) \u2022 ${obj.w}\u00d7${obj.h} cm`;
+      coordsEl.textContent=obj.enabled
+        ? `(${obj.x}, ${obj.y}) \u2022 r\u2009=\u2009${obj.r} cm`
+        : 'disabled';
 
       body.appendChild(lblEl);
       body.appendChild(coordsEl);
 
-      const del=document.createElement('button');
-      del.className='obj-item-del';
-      del.textContent='\u2715';
-      del.title='Delete object';
-      del.addEventListener('click',e=>{
-        e.stopPropagation();
-        objects.splice(i,1);
-        if(selectedObjectIdx===i) selectedObjectIdx=null;
-        else if(selectedObjectIdx!==null && selectedObjectIdx>i) selectedObjectIdx--;
-        saveObjects();
-        renderObjectsList();
-        enqueueDraw();
-      });
-
       item.appendChild(dot);
       item.appendChild(body);
-      item.appendChild(del);
       item.addEventListener('click',()=>{
-        selectedObjectIdx=(selectedObjectIdx===i)?null:i;
+        selectedObjectIdx=(sel)?null:i;
         renderObjectsList();
         enqueueDraw();
       });
       objectsListEl.appendChild(item);
 
-      if(selectedObjectIdx===i){
+      if(sel){
         const editor=document.createElement('div');
         editor.className='obj-editor';
 
-        // Label field
-        const lblRow=document.createElement('div');
-        const lblHdr=document.createElement('div');
-        lblHdr.className='obj-field-lbl';
-        lblHdr.textContent='Label';
-        const lblInput=document.createElement('input');
-        lblInput.type='text';
-        lblInput.value=obj.label||'';
-        lblInput.placeholder='Object name';
-        lblInput.addEventListener('input',()=>{
-          obj.label=lblInput.value;
-          lblEl.textContent=obj.label||('Object '+(i+1));
-          saveObjects();
+        // Enabled toggle row
+        const enRow=document.createElement('div');
+        enRow.style.cssText='display:flex;align-items:center;gap:8px;margin-bottom:2px;';
+        const enLbl=document.createElement('span');
+        enLbl.textContent='Enabled';
+        enLbl.style.cssText='font-size:calc(12px * var(--ui));flex:1;color:var(--fg);';
+        const enBtn=document.createElement('button');
+        enBtn.className='btn-plain';
+        enBtn.style.cssText='height:calc(26px * var(--ui));font-size:calc(11px * var(--ui));padding:0 8px;';
+        enBtn.textContent=obj.enabled?'On':'Off';
+        enBtn.style.color=obj.enabled?'#7ab8f5':'var(--muted)';
+        enBtn.addEventListener('click',async()=>{
+          obj.enabled=!obj.enabled;
+          enBtn.textContent=obj.enabled?'On':'Off';
+          enBtn.style.color=obj.enabled?'#7ab8f5':'var(--muted)';
+          dot.style.background=obj.enabled?'#7ab8f5':'#3a4a5a';
+          coordsEl.textContent=obj.enabled?`(${obj.x}, ${obj.y}) \u2022 r\u2009=\u2009${obj.r} cm`:'disabled';
+          try{ await saveObjectEnabledToHA(n); }catch(e){ reportError(e?.message||'Save failed'); }
           enqueueDraw();
         });
-        lblRow.appendChild(lblHdr);
-        lblRow.appendChild(lblInput);
-        editor.appendChild(lblRow);
+        enRow.appendChild(enLbl);
+        enRow.appendChild(enBtn);
+        editor.appendChild(enRow);
 
-        // Numeric fields grid
+        // Numeric fields
         const fields=document.createElement('div');
         fields.className='obj-editor-fields';
-        const b=currentBounds();
         function numField(label,val,min,max,onChange){
           const wrap=document.createElement('div');
           const h=document.createElement('div');
@@ -1224,9 +1250,13 @@
           inp.min=min;
           inp.max=max;
           inp.step=1;
-          inp.addEventListener('change',()=>{
+          inp.addEventListener('change',async()=>{
             const v=Math.round(Number(inp.value));
-            if(Number.isFinite(v)){ onChange(v); saveObjects(); renderObjectsList(); enqueueDraw(); }
+            if(Number.isFinite(v)){
+              onChange(v);
+              coordsEl.textContent=obj.enabled?`(${obj.x}, ${obj.y}) \u2022 r\u2009=\u2009${obj.r} cm`:'disabled';
+              enqueueDraw();
+            }
           });
           wrap.appendChild(h);
           wrap.appendChild(inp);
@@ -1234,45 +1264,87 @@
         }
         fields.appendChild(numField('X (cm)',obj.x,b.xMin,b.xMax,v=>{obj.x=v;}));
         fields.appendChild(numField('Y (cm)',obj.y,b.yMin,b.yMax,v=>{obj.y=v;}));
-        fields.appendChild(numField('Width (cm)',obj.w,1,2000,v=>{obj.w=v;}));
-        fields.appendChild(numField('Depth (cm)',obj.h,1,2000,v=>{obj.h=v;}));
+        fields.appendChild(numField('Radius (cm)',obj.r,0,600,v=>{obj.r=v;}));
+
         editor.appendChild(fields);
+
+        // Save button
+        const saveRow=document.createElement('div');
+        saveRow.style.cssText='margin-top:4px;';
+        const saveBtn=document.createElement('button');
+        saveBtn.className='btn-primary';
+        saveBtn.style.cssText='width:100%;height:calc(30px * var(--ui));font-size:calc(12px * var(--ui));';
+        saveBtn.textContent='Save';
+        saveBtn.addEventListener('click',async()=>{
+          saveBtn.textContent='Saving\u2026';
+          saveBtn.disabled=true;
+          try{
+            await saveObjectToHA(n);
+            coordsEl.textContent=obj.enabled?`(${obj.x}, ${obj.y}) \u2022 r\u2009=\u2009${obj.r} cm`:'disabled';
+            saveBtn.textContent='Saved';
+          }catch(e){
+            reportError(e?.message||'Save failed');
+            saveBtn.textContent='Save';
+          }finally{
+            saveBtn.disabled=false;
+            setTimeout(()=>{ if(saveBtn.textContent==='Saved') saveBtn.textContent='Save'; },1500);
+          }
+        });
+        saveRow.appendChild(saveBtn);
+        editor.appendChild(saveRow);
         objectsListEl.appendChild(editor);
       }
     });
   }
   function drawObjects(){
-    if(!objects.length) return;
     ctx.save();
     objects.forEach((obj,i)=>{
+      if(!obj.enabled&&!objectsMode) return;
       const sel=selectedObjectIdx===i;
-      const px1=toPxX(obj.x-obj.w/2), py1=toPxY(obj.y-obj.h/2);
-      const pw=toPxX(obj.x+obj.w/2)-px1;
-      const ph=toPxY(obj.y+obj.h/2)-py1;
-      ctx.globalAlpha=sel?0.32:0.18;
+      const cx=toPxX(obj.x), cy=toPxY(obj.y);
+      // Radius in pixels (use x-axis scale)
+      const rPx=Math.abs(toPxX(obj.x+obj.r)-cx);
+      const dimmed=!obj.enabled;
+      const alpha=dimmed?0.35:1;
+
+      // Halo circle
+      ctx.globalAlpha=(sel?0.22:0.12)*alpha;
       ctx.fillStyle=sel?'#7ab8f5':'#8fbbd8';
       ctx.beginPath();
-      ctx.rect(px1,py1,pw,ph);
+      ctx.arc(cx,cy,rPx,0,Math.PI*2);
       ctx.fill();
-      ctx.globalAlpha=sel?1:0.55;
+      ctx.globalAlpha=(sel?0.8:0.45)*alpha;
       ctx.strokeStyle=sel?'#7ab8f5':'#4a7a9b';
       ctx.lineWidth=sel?1.5:1;
+      ctx.setLineDash(dimmed?[4,4]:[]);
       ctx.stroke();
-      const cx=px1+pw/2, cy=py1+ph/2;
-      ctx.globalAlpha=sel?0.95:0.65;
-      const fs=Math.max(9,Math.min(14,Math.round(11*(cam2D?.zoom||1))));
+      ctx.setLineDash([]);
+
+      // Center crosshair
+      const arm=6;
+      ctx.globalAlpha=(sel?1:0.7)*alpha;
+      ctx.strokeStyle=sel?'#7ab8f5':'#4a7a9b';
+      ctx.lineWidth=sel?1.5:1;
+      ctx.beginPath();
+      ctx.moveTo(cx-arm,cy); ctx.lineTo(cx+arm,cy);
+      ctx.moveTo(cx,cy-arm); ctx.lineTo(cx,cy+arm);
+      ctx.stroke();
+
+      // Center dot
+      ctx.beginPath();
+      ctx.arc(cx,cy,3,0,Math.PI*2);
+      ctx.fillStyle=sel?'#7ab8f5':'#4a7a9b';
+      ctx.globalAlpha=(sel?1:0.8)*alpha;
+      ctx.fill();
+
+      // Label
+      const fs=Math.max(9,Math.min(13,Math.round(10*(cam2D?.zoom||1))));
       ctx.font=`${fs}px system-ui,sans-serif`;
       ctx.textAlign='center';
-      ctx.textBaseline='middle';
+      ctx.textBaseline='bottom';
       ctx.fillStyle=sel?'#c8dff5':'#7aaac8';
-      ctx.fillText(obj.label||('Obj '+(i+1)),cx,cy);
-      if(objectsMode){
-        ctx.beginPath();
-        ctx.arc(cx,cy,5,0,Math.PI*2);
-        ctx.fillStyle=sel?'#7ab8f5':'#4a7a9b';
-        ctx.globalAlpha=0.85;
-        ctx.fill();
-      }
+      ctx.globalAlpha=(sel?0.95:0.65)*alpha;
+      ctx.fillText(obj.label,cx,cy-rPx-4);
     });
     ctx.globalAlpha=1;
     ctx.restore();
@@ -1280,10 +1352,11 @@
   function hitObject(px,py){
     for(let i=objects.length-1;i>=0;i--){
       const obj=objects[i];
-      const ox=toPxX(obj.x), oy=toPxY(obj.y);
-      const hw=Math.abs(toPxX(obj.x+obj.w/2)-ox);
-      const hh=Math.abs(toPxY(obj.y+obj.h/2)-oy);
-      if(px>=ox-hw&&px<=ox+hw&&py>=oy-hh&&py<=oy+hh) return i;
+      if(!obj.enabled&&!objectsMode) continue;
+      const cx=toPxX(obj.x), cy=toPxY(obj.y);
+      const dist=Math.hypot(px-cx,py-cy);
+      const rPx=Math.abs(toPxX(obj.x+obj.r)-cx);
+      if(dist<=Math.max(rPx,12)) return i;
     }
     return -1;
   }
@@ -1446,6 +1519,9 @@
     }
     await loadDetectionRangeCore();
     for(const z of ['1','2','3','excl']) await loadZoneCore(z);
+    loadObjectsCore();
+    updateZoneButtonLabels();
+    renderObjectsList();
     enqueueDraw();
   }
 
@@ -1462,8 +1538,6 @@
     };
     await loadDeviceEntities(target.device_id);
     await loadAll();
-    objects=loadObjectsForDevice();
-    renderObjectsList();
     const sensorIdx = floorplanSensors.findIndex(s=>s.device_id===selectedDevice.device_id);
     if(sensorIdx>=0){
       floorplanSensors[sensorIdx]=clampSensorPos({
@@ -5145,18 +5219,6 @@ ctx.restore();
     dragWhole=false;
 
     if(objectsMode){
-      if(button===2){
-        const hit=hitObject(px,py);
-        if(hit>=0){
-          objects.splice(hit,1);
-          if(selectedObjectIdx===hit) selectedObjectIdx=null;
-          else if(selectedObjectIdx!==null&&selectedObjectIdx>hit) selectedObjectIdx--;
-          saveObjects();
-          renderObjectsList();
-          enqueueDraw();
-        }
-        return;
-      }
       const hit=hitObject(px,py);
       if(hit>=0){
         selectedObjectIdx=hit;
@@ -5166,16 +5228,7 @@ ctx.restore();
         renderObjectsList();
         enqueueDraw();
       } else {
-        const b=currentBounds();
-        const x=Math.round(Math.max(b.xMin,Math.min(b.xMax,toCmX(px))));
-        const y=Math.round(Math.max(b.yMin,Math.min(b.yMax,toCmY(py))));
-        const newObj={id:genObjectId(),x,y,w:50,h:50,label:'Object '+(objects.length+1)};
-        objects.push(newObj);
-        selectedObjectIdx=objects.length-1;
-        objectDragIdx=selectedObjectIdx;
-        objectDragOffX=0;
-        objectDragOffY=0;
-        saveObjects();
+        selectedObjectIdx=null;
         renderObjectsList();
         enqueueDraw();
       }
@@ -5365,8 +5418,9 @@ ctx.restore();
     dragIdx=null;
     dragWhole=false;
     if(objectDragIdx!==null){
-      saveObjects();
+      const n=objects[objectDragIdx]?.n;
       objectDragIdx=null;
+      if(n) saveObjectToHA(n).catch(e=>reportError(e?.message||'Save failed'));
     }
   }
 
@@ -5947,20 +6001,6 @@ ctx.restore();
       enqueueDraw();
     });
   }
-  if(addObjectBtn){
-    addObjectBtn.addEventListener('click',()=>{
-      const b=currentBounds();
-      const x=Math.round((b.xMin+b.xMax)/2);
-      const y=Math.round((b.yMin+b.yMax)/2);
-      const newObj={id:genObjectId(),x,y,w:50,h:50,label:'Object '+(objects.length+1)};
-      objects.push(newObj);
-      selectedObjectIdx=objects.length-1;
-      saveObjects();
-      renderObjectsList();
-      enqueueDraw();
-    });
-  }
-
   async function handleDeviceSelection(selectEl){
     if(!selectEl || !selectEl.value){
       reportError('No data available');
